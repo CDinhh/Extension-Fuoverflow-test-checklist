@@ -3,6 +3,8 @@
 Extension trình duyệt (Manifest V3) thêm ô checkbox vào từng thread trong danh sách
 diễn đàn [FuOverflow](https://fuoverflow.com), để bạn đánh dấu những đề thi đã ôn xong.
 
+![Ảnh minh hoạ](docs/screenshot.png)
+
 ## Tính năng
 
 - Có checkbox đứng trước tiêu đề mỗi thread trong danh sách.
