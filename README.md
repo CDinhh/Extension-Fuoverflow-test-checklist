@@ -1,25 +1,24 @@
 # Extension-Fuoverflow-test-checklist
 
-Browser extension (Manifest V3) that adds a checkbox to every thread in the
-[FuOverflow](https://fuoverflow.com) forum lists, so you can tick the exams you have
-finished reviewing.
+Extension trình duyệt (Manifest V3) thêm ô checkbox vào từng thread trong danh sách
+diễn đàn [FuOverflow](https://fuoverflow.com), để bạn đánh dấu những đề thi đã ôn xong.
 
-## Features
+## Tính năng
 
-- Checkbox in front of each thread title on thread lists.
-- Ticked threads are struck through and highlighted.
-- State is saved in `localStorage` (key `fuo-test-checklist`), keyed by thread ID, so it
-  survives pagination, reordering and page reloads.
-- Progress bar showing the total ticked and the count on the current page.
+- Có checkbox đứng trước tiêu đề mỗi thread trong danh sách.
+- Thread đã tick sẽ bị gạch ngang và tô nền xanh nhạt.
+- Trạng thái lưu trong `localStorage` (key `fuo-test-checklist`), theo ID thread, nên vẫn
+  giữ nguyên khi phân trang, đổi thứ tự hoặc tải lại trang.
+- Thanh tiến độ hiển thị tổng số đề đã tick và số đề đã tick trên trang hiện tại.
 
-## Install (Brave / Chrome)
+## Cài đặt (Brave / Chrome)
 
-1. Open `brave://extensions` (or `chrome://extensions`).
-2. Enable **Developer mode**.
-3. Click **Load unpacked** and select this folder.
-4. Open a forum page such as https://fuoverflow.com/forums/MLN111/.
+1. Mở `brave://extensions` (hoặc `chrome://extensions`).
+2. Bật **Developer mode**.
+3. Bấm **Load unpacked** và chọn thư mục này.
+4. Mở một trang diễn đàn, ví dụ https://fuoverflow.com/forums/MLN111/.
 
-## Notes
+## Lưu ý
 
-- Data is stored per browser; ticks in Brave do not appear in Chrome.
-- The total counts every ticked thread on fuoverflow.com, not only one subject.
+- Dữ liệu lưu riêng theo từng trình duyệt; tick ở Brave sẽ không hiện ở Chrome.
+- Tổng số đề đã tick tính trên toàn bộ fuoverflow.com, không riêng một môn.
