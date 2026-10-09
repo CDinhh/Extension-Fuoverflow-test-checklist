@@ -9,6 +9,13 @@
       "js": ["content.js"],
       "css": ["content.css"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://fuoverflow.com/*"],
+      "js": ["lightbox.js"],
+      "css": ["lightbox.css"],
+      "world": "MAIN",
+      "run_at": "document_idle"
     }
   ]
 }
