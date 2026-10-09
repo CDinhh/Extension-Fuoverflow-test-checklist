@@ -1,0 +1,27 @@
+.fuo-check {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  margin-right: 8px;
+  vertical-align: middle;
+  cursor: pointer;
+  accent-color: #2ea043;
+}
+
+.fuo-done .structItem-title > a:not(.labelLink) {
+  text-decoration: line-through;
+  opacity: 0.55;
+}
+
+.fuo-done .structItem-cell--main {
+  background: rgba(46, 160, 67, 0.08);
+}
+
+.fuo-progress {
+  margin: 8px 0;
+  padding: 6px 12px;
+  border-radius: 6px;
+  background: rgba(46, 160, 67, 0.15);
+  color: #3fb950;
+  font-weight: 600;
+}

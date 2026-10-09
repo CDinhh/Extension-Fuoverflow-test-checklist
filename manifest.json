@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "FuOverflow Test Checklist",
+  "version": "1.0.0",
+  "description": "Tick the exam threads on FuOverflow that you have finished reviewing. Saved in localStorage.",
+  "content_scripts": [
+    {
+      "matches": ["https://fuoverflow.com/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}
