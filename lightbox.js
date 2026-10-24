@@ -3,9 +3,46 @@
 (() => {
   const PANEL_CLASS = "fuo-jump";
   const FLAGS_KEY = "fuo-question-flags";
+  const PROGRESS_KEY = "fuo-study-progress";
+  const SPEED_KEY = "fuo-capture-speed";
 
-  // Flags are stored per thread as a list of 0-based slide indexes.
-  const threadKey = () => (location.pathname.match(/\.(\d+)\/?/) || [])[1] || location.pathname;
+  // Flags and progress are stored per thread by thread numeric ID.
+  const threadKey = () => {
+    const match = location.pathname.match(/\/threads\/(?:[^\/]*?\.)?(\d+)/) || location.pathname.match(/\.(\d+)\/?/);
+    if (match && match[1]) return match[1];
+    // Sanitize pathname so it never contains illegal characters like slashes in filenames
+    const clean = location.pathname.replace(/[^\w-]/g, "_").replace(/^_+|_+$/g, "");
+    return clean || "exam";
+  };
+
+  const loadProgress = () => {
+    try {
+      return JSON.parse(localStorage.getItem(PROGRESS_KEY)) || {};
+    } catch {
+      return {};
+    }
+  };
+
+  const saveStudyProgress = (id, current, total) => {
+    if (!id) return;
+    try {
+      const all = JSON.parse(localStorage.getItem(PROGRESS_KEY)) || {};
+      all[id] = {
+        ...(all[id] || {}),
+        current: Number(current),
+        total: Number(total),
+        updatedAt: Date.now()
+      };
+      localStorage.setItem(PROGRESS_KEY, JSON.stringify(all));
+      window.dispatchEvent(
+        new CustomEvent("fuo:progress-updated", {
+          detail: { id, current: Number(current), total: Number(total) }
+        })
+      );
+    } catch {
+      /* storage unavailable: progress just won't persist */
+    }
+  };
 
   const loadFlags = () => {
     try {
@@ -34,12 +71,163 @@
     return node;
   };
 
+  // Request visible tab screenshot from isolated content script -> background service worker
+  const requestTabCapture = () => {
+    return new Promise((resolve, reject) => {
+      const requestId = "fuo_cap_" + Math.random().toString(36).slice(2) + Date.now();
+
+      const onMessage = (event) => {
+        if (event.source !== window || event.data?.source !== "fuo-isolated") return;
+        if (event.data.action === "captureTabResponse" && event.data.requestId === requestId) {
+          window.removeEventListener("message", onMessage);
+          clearTimeout(timeoutId);
+          const resp = event.data.response;
+          if (resp?.success && resp?.dataUrl) {
+            resolve(resp.dataUrl);
+          } else {
+            const errStr = resp?.error || "Không nhận được phản hồi từ extension";
+            reject(new Error(errStr));
+          }
+        }
+      };
+
+      const timeoutId = setTimeout(() => {
+        window.removeEventListener("message", onMessage);
+        reject(new Error("Hết thời gian chờ chụp ảnh (10s). Vui lòng Reload extension và F5 lại trang!"));
+      }, 10000);
+
+      window.addEventListener("message", onMessage);
+      window.postMessage({ source: "fuo-main", action: "captureTab", requestId }, "*");
+    });
+  };
+
+  // Decode data URL to byte array using pure JS (atob) to prevent CSP restrictions on fetch()
+  const dataUrlToBytes = (dataUrl) => {
+    const comma = dataUrl.indexOf(",");
+    const base64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+    const binary = atob(base64);
+    const len = binary.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  };
+
+  // Minimal store-only (no compression) ZIP writer: images are already compressed,
+  // and this avoids bundling a library into the extension.
+  const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+    for (let k = 0; k < 8; k++) n = n & 1 ? 0xedb88320 ^ (n >>> 1) : n >>> 1;
+    return n >>> 0;
+  });
+  const crc32 = (bytes) => {
+    let crc = 0xffffffff;
+    for (const b of bytes) crc = CRC_TABLE[(crc ^ b) & 0xff] ^ (crc >>> 8);
+    return (crc ^ 0xffffffff) >>> 0;
+  };
+
+  const makeZip = (files) => {
+    const enc = new TextEncoder();
+    const parts = [];
+    const central = [];
+    let offset = 0;
+    for (const { name, data } of files) {
+      const nameBytes = enc.encode(name);
+      const crc = crc32(data);
+      const local = new DataView(new ArrayBuffer(30));
+      local.setUint32(0, 0x04034b50, true);
+      local.setUint16(4, 20, true);
+      local.setUint16(6, 0x0800, true); // UTF-8 file names
+      local.setUint32(14, crc, true);
+      local.setUint32(18, data.length, true);
+      local.setUint32(22, data.length, true);
+      local.setUint16(26, nameBytes.length, true);
+      parts.push(local, nameBytes, data);
+
+      const entry = new DataView(new ArrayBuffer(46));
+      entry.setUint32(0, 0x02014b50, true);
+      entry.setUint16(4, 20, true);
+      entry.setUint16(6, 20, true);
+      entry.setUint16(8, 0x0800, true);
+      entry.setUint32(16, crc, true);
+      entry.setUint32(20, data.length, true);
+      entry.setUint32(24, data.length, true);
+      entry.setUint16(28, nameBytes.length, true);
+      entry.setUint32(42, offset, true);
+      central.push(entry, nameBytes);
+      offset += 30 + nameBytes.length + data.length;
+    }
+    const centralSize = central.reduce((n, p) => n + (p.byteLength ?? p.length), 0);
+    const end = new DataView(new ArrayBuffer(22));
+    end.setUint32(0, 0x06054b50, true);
+    end.setUint16(8, files.length, true);
+    end.setUint16(10, files.length, true);
+    end.setUint32(12, centralSize, true);
+    end.setUint32(16, offset, true);
+    return new Blob([...parts, ...central, end], { type: "application/zip" });
+  };
+
+  const saveBlob = (blob, filename) => {
+    const a = el("a");
+    const url = URL.createObjectURL(blob);
+    a.href = url;
+    a.download = filename;
+    document.body.append(a);
+    a.click();
+    setTimeout(() => {
+      a.remove();
+      URL.revokeObjectURL(url);
+    }, 60000);
+  };
+
+  // Wait for slide image to load and sidebar comments to settle before capturing
+  const waitForSlideReady = async (fancybox, container, targetIndex, speedDelay = 1000) => {
+    const start = Date.now();
+
+    // 1. Wait for Fancybox to report current slide index
+    while (fancybox.getSlide()?.index !== targetIndex) {
+      if (Date.now() - start > 4000) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+
+    // 2. Wait until the active slide's image is completed
+    while (Date.now() - start < 5000) {
+      const slide = fancybox.getSlide();
+      const slideEl =
+        slide?.$el ||
+        slide?.el ||
+        container.querySelector(".fancybox__slide.is-selected") ||
+        container.querySelector(".fancybox-slide--current") ||
+        container.querySelector(".carousel__slide.is-selected");
+
+      const img =
+        slideEl?.querySelector("img.fancybox__image, img.fancybox-image, img") ||
+        container.querySelector(".fancybox__slide.is-selected img");
+
+      if (!img || (img.complete && img.naturalWidth > 0)) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 60));
+    }
+
+    // 3. Pause if user switched to another tab (resume when tab is visible again)
+    while (document.hidden) {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+
+    // 4. Settling delay for Fancybox transition animations and XenForo comments DOM render
+    await new Promise((r) => setTimeout(r, speedDelay));
+  };
+
   const build = (container, fancybox) => {
     const total = fancybox.carousel.slides.length;
-    if (total < 2) return;
+    if (total < 1) return;
 
     const flags = loadFlags();
     let current = fancybox.getSlide()?.index ?? 0;
+
+    // Save initial study progress upon opening lightbox
+    saveStudyProgress(threadKey(), current + 1, total);
 
     const wrap = el("div", PANEL_CLASS);
 
@@ -55,6 +243,20 @@
     flagBtn.title = "Đánh dấu câu chưa chắc";
     bar.append(toggle, flagBtn);
 
+    // Toast status notice placed directly in wrap (always visible even when body is hidden)
+    let toastTimer = null;
+    const toast = el("div", "fuo-jump__toast");
+    toast.hidden = true;
+
+    const showToast = (text, duration = 4000) => {
+      clearTimeout(toastTimer);
+      toast.textContent = text;
+      toast.hidden = false;
+      toastTimer = setTimeout(() => {
+        toast.hidden = true;
+      }, duration);
+    };
+
     const body = el("div", "fuo-jump__body");
     body.hidden = true;
 
@@ -64,6 +266,68 @@
     const top = el("div", "fuo-jump__top");
     top.append(summary, nextFlag);
 
+    // If opened at slide 0 but previously studied further, offer quick resume
+    const saved = loadProgress()[threadKey()];
+    const lastStudied = saved?.current;
+    if (lastStudied && lastStudied > 1 && lastStudied <= total && current === 0) {
+      const resumeBtn = el("button", "fuo-jump__resume", `Tiếp tục câu ${lastStudied} →`);
+      resumeBtn.type = "button";
+      resumeBtn.title = `Nhảy tới câu ${lastStudied} đang học trước đó`;
+      resumeBtn.addEventListener("click", () => {
+        fancybox.jumpTo(lastStudied - 1);
+        resumeBtn.remove();
+      });
+      top.append(resumeBtn);
+    }
+
+    // --- SCREENSHOT CAPTURE SECTION (Recommended: captures both question & chat sidebar) ---
+    const capTitle = el("div", "fuo-jump__section-title");
+    const capTitleText = el("span", "", "Chụp màn hình (+ khung chat)");
+    const capTag = el("span", "fuo-jump__tag", "Khuyên dùng");
+    capTitle.append(capTitleText, capTag);
+
+    const capRow = el("div", "fuo-jump__actions fuo-jump__actions--capture");
+    const capAll = el("button", "is-primary", `Chụp tất cả (${total})`);
+    capAll.type = "button";
+    capAll.title = "Chụp toàn bộ câu hỏi kèm khung chat thảo luận đáp án, nén thành file ZIP";
+
+    const capFlagged = el("button", "", "Chụp câu cờ");
+    capFlagged.type = "button";
+    capFlagged.title = "Chụp các câu đã đánh dấu cờ kèm khung chat";
+
+    const capCurrent = el("button", "", "Chụp câu này");
+    capCurrent.type = "button";
+    capCurrent.title = "Chụp câu đang xem kèm khung chat tải về 1 ảnh PNG";
+
+    capRow.append(capAll, capFlagged, capCurrent);
+
+    // Capture speed delay selector
+    const speedRow = el("div", "fuo-jump__speed-row");
+    const speedLabel = el("label", "", "Tốc độ chụp mỗi câu:");
+    const speedSelect = el("select", "fuo-jump__speed-select");
+    const speedOptions = [
+      { val: 500, text: "Tối đa (0.5s - sát giới hạn Chrome)" },
+      { val: 700, text: "Nhanh (0.7s)" },
+      { val: 1000, text: "Chuẩn (1.0s)" },
+      { val: 1500, text: "Kỹ (1.5s - mạng chậm)" }
+    ];
+    let savedSpeed = Number(localStorage.getItem(SPEED_KEY)) || 1000;
+    speedOptions.forEach((opt) => {
+      const o = document.createElement("option");
+      o.value = opt.val;
+      o.textContent = opt.text;
+      if (opt.val === savedSpeed) o.selected = true;
+      speedSelect.append(o);
+    });
+    speedSelect.addEventListener("change", () => {
+      savedSpeed = Number(speedSelect.value) || 1000;
+      try {
+        localStorage.setItem(SPEED_KEY, String(savedSpeed));
+      } catch {}
+    });
+    speedRow.append(speedLabel, speedSelect);
+
+    // --- BUTTONS GRID ---
     const grid = el("div", "fuo-jump__grid");
     const buttons = [];
     for (let i = 0; i < total; i++) {
@@ -71,8 +335,6 @@
       b.type = "button";
       b.addEventListener("click", () => {
         fancybox.jumpTo(i);
-        body.hidden = true;
-        toggle.classList.remove("is-open");
       });
       buttons.push(b);
       grid.append(b);
@@ -82,21 +344,174 @@
     legend.innerHTML =
       '<span><i class="is-current"></i>Đang xem</span><span><i class="is-flagged"></i>Chưa chắc</span>';
 
-    body.append(top, grid, legend);
-    wrap.append(bar, body);
+    body.append(top, capTitle, capRow, speedRow, grid, legend);
+    wrap.append(bar, toast, body);
 
     // The sidebar body is re-rendered on every slide change, so mount on the
     // sidebar shell itself (above the poster info) when it exists.
     (container.querySelector(".fancybox-sidebar") || container).prepend(wrap);
 
+    let isBusy = false;
+    let abortCapture = false;
+
+    const setButtonsDisabled = (disabled) => {
+      capAll.disabled = disabled;
+      capFlagged.disabled = disabled || flags.size === 0;
+      capCurrent.disabled = disabled;
+    };
+
     const renderFlags = () => {
       buttons.forEach((b, i) => b.classList.toggle("is-flagged", flags.has(i)));
       summary.textContent = flags.size ? `⚑ ${flags.size} câu chưa chắc` : "Chưa gắn cờ câu nào";
       nextFlag.disabled = flags.size === 0;
+      if (!isBusy) {
+        setButtonsDisabled(false);
+      }
       const on = flags.has(current);
       flagBtn.classList.toggle("is-on", on);
       flagBtn.textContent = on ? "⚑ Bỏ cờ" : "⚐ Gắn cờ";
     };
+
+    // --- SCREENSHOT BATCH CAPTURE LOGIC ---
+    const runScreenshotCapture = async (indexes, zipName) => {
+      if (isBusy || !indexes.length) return;
+      isBusy = true;
+      abortCapture = false;
+
+      const initialSlideIndex = fancybox.getSlide()?.index ?? 0;
+
+      // Collapse dropdown so it doesn't cover comments in screenshots
+      body.hidden = true;
+      toggle.classList.remove("is-open");
+
+      // Stop button in top bar
+      const stopBtn = el("button", "fuo-jump__stop", `Dừng (0/${indexes.length})`);
+      stopBtn.type = "button";
+      stopBtn.title = "Bấm để dừng chụp (các ảnh đã chụp vẫn sẽ được tải về)";
+      stopBtn.addEventListener("click", () => {
+        abortCapture = true;
+        stopBtn.textContent = "Đang dừng…";
+      });
+      bar.append(stopBtn);
+
+      setButtonsDisabled(true);
+
+      const originalTitle = document.title;
+      const capturedFiles = [];
+
+      for (let k = 0; k < indexes.length; k++) {
+        if (abortCapture || !container.isConnected) break;
+
+        const slideIdx = indexes[k];
+        stopBtn.textContent = `Dừng (${k + 1}/${indexes.length})`;
+        document.title = `(${k + 1}/${indexes.length}) Đang chụp... - FuOverflow`;
+
+        fancybox.jumpTo(slideIdx);
+        await waitForSlideReady(fancybox, container, slideIdx, savedSpeed);
+
+        if (abortCapture || !container.isConnected) break;
+
+        // Hide stop button during the 50ms capture window for 100% clean screenshot
+        stopBtn.style.visibility = "hidden";
+        await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 40)));
+
+        try {
+          const dataUrl = await requestTabCapture();
+          const bytes = dataUrlToBytes(dataUrl);
+          const name = `Cau-${String(slideIdx + 1).padStart(2, "0")}.png`;
+          capturedFiles.push({ name, data: bytes });
+        } catch (err) {
+          console.error(`Lỗi chụp câu ${slideIdx + 1}:`, err);
+          // If first slide fails, abort immediately and alert with clear instructions
+          if (k === 0) {
+            abortCapture = true;
+            const isInvalidated = /context invalidated/i.test(err?.message || "");
+            if (isInvalidated) {
+              if (confirm("Extension vừa được cập nhật/reload nên trang web bị ngắt kết nối với extension.\n\nBấm OK để tự động tải lại (F5) trang FuOverflow ngay bây giờ!")) {
+                location.reload();
+              }
+            } else {
+              alert(
+                `Không thể chụp màn hình: ${err.message}\n\nHãy làm theo đúng thứ tự sau:\n1. Mở trang brave://extensions (hoặc chrome://extensions)\n2. Bấm nút Reload 🔄 của extension 'FuOverflow Test Checklist'\n3. QUAN TRỌNG: Quay lại tab FuOverflow và nhấn F5 tải lại trang!`
+              );
+            }
+            break;
+          }
+        } finally {
+          stopBtn.style.visibility = "visible";
+        }
+      }
+
+      document.title = originalTitle;
+      stopBtn.remove();
+
+      // Return user to original slide
+      if (container.isConnected) {
+        fancybox.jumpTo(initialSlideIndex);
+      }
+
+      if (capturedFiles.length) {
+        const finalZipName = abortCapture
+          ? zipName.replace(".zip", "-tam-dung.zip")
+          : zipName;
+        saveBlob(makeZip(capturedFiles), finalZipName);
+        showToast(`✓ Đã lưu ${capturedFiles.length} ảnh vào file ${finalZipName}!`, 5000);
+      } else if (!abortCapture) {
+        showToast("Không chụp được ảnh nào. Vui lòng F5 thử lại!", 5000);
+      }
+
+      // Re-open body panel
+      body.hidden = false;
+      toggle.classList.add("is-open");
+
+      isBusy = false;
+      renderFlags();
+    };
+
+    // Single slide capture
+    const runCaptureCurrent = async () => {
+      if (isBusy) return;
+      isBusy = true;
+      const cur = fancybox.getSlide()?.index ?? 0;
+
+      body.hidden = true;
+      toggle.classList.remove("is-open");
+      await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 50)));
+
+      try {
+        const dataUrl = await requestTabCapture();
+        const bytes = dataUrlToBytes(dataUrl);
+        const blob = new Blob([bytes], { type: "image/png" });
+        saveBlob(blob, `fuoverflow-${threadKey()}-Cau-${String(cur + 1).padStart(2, "0")}.png`);
+        showToast(`✓ Đã chụp câu ${cur + 1} kèm khung chat!`, 4000);
+      } catch (err) {
+        console.error("Lỗi chụp đơn:", err);
+        const isInvalidated = /context invalidated/i.test(err?.message || "");
+        if (isInvalidated) {
+          if (confirm("Extension vừa được cập nhật/reload nên trang web bị ngắt kết nối với extension.\n\nBấm OK để tự động tải lại (F5) trang FuOverflow ngay bây giờ!")) {
+            location.reload();
+          }
+        } else {
+          alert(
+            `Không thể chụp ảnh: ${err.message}\n\nHãy làm theo đúng thứ tự sau:\n1. Vào brave://extensions (hoặc chrome://extensions) bấm Reload 🔄 extension\n2. QUAN TRỌNG: Quay lại tab FuOverflow và nhấn F5 tải lại trang!`
+          );
+        }
+      } finally {
+        isBusy = false;
+        body.hidden = false;
+        toggle.classList.add("is-open");
+        renderFlags();
+      }
+    };
+
+    // Event listeners for screenshot capture
+    capAll.addEventListener("click", () =>
+      runScreenshotCapture([...Array(total).keys()], `fuoverflow-${threadKey()}-kem-chat-tat-ca.zip`)
+    );
+    capFlagged.addEventListener("click", () =>
+      runScreenshotCapture([...flags].sort((a, b) => a - b), `fuoverflow-${threadKey()}-kem-chat-cau-co.zip`)
+    );
+    capCurrent.addEventListener("click", runCaptureCurrent);
 
     toggle.addEventListener("click", () => {
       body.hidden = !body.hidden;
@@ -127,6 +542,8 @@
       last = current;
       label.textContent = `Câu ${current + 1}/${total}`;
       renderFlags();
+      // Record latest question progress
+      saveStudyProgress(threadKey(), current + 1, total);
     };
     const timer = setInterval(sync, 250);
     sync();
@@ -139,7 +556,14 @@
     // sidebar afterwards, so bail out until they exist; a later mutation retries.
     if (container.classList.contains("fancybox-has-sidebar") && !container.querySelector(".fancybox-sidebar")) return;
     const fancybox = window.Fancybox?.getInstance?.();
-    if (fancybox?.carousel?.slides) build(container, fancybox);
+    if (fancybox?.carousel?.slides) {
+      const total = fancybox.carousel.slides.length;
+      if (total >= 1) {
+        const cur = (fancybox.getSlide()?.index ?? 0) + 1;
+        saveStudyProgress(threadKey(), cur, total);
+      }
+      build(container, fancybox);
+    }
   };
 
   // subtree: the container itself is populated after it lands in <body>.
